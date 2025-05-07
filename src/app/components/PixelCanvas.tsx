@@ -1,29 +1,13 @@
 import React, { useRef, useEffect, useState } from "react";
 import { io, Socket } from "socket.io-client";
-
-// === Canvas Constants ===
-const CANVAS_WIDTH = 1000;
-const CANVAS_HEIGHT = 1000;
-const MIN_SCALE = 0.1;
-const MAX_SCALE = 20;
-
-const COLOR_PALETTE: string[] = [
-  "#FFFFFF",
-  "#000000",
-  "#FF4500",
-  "#FFA800",
-  "#FFD635",
-  "#00A368",
-  "#7EED56",
-  "#2450A4",
-  "#3690EA",
-  "#51E9F4",
-  "#811E9F",
-  "#B44AC0",
-  "#FF99AA",
-  "#9C6926",
-  "#6D482F",
-];
+import {
+  COLOR_PALETTE,
+  CANVAS_WIDTH,
+  CANVAS_HEIGHT,
+  MIN_SCALE,
+  MAX_SCALE,
+  INITIAL_SCALE,
+} from "../../../lib/constants";
 
 interface PixelCoord {
   x: number;
@@ -38,10 +22,11 @@ const PixelCanvas: React.FC = () => {
   const pixelsRef = useRef(pixels);
 
   const [selectedColor, setSelectedColor] = useState<string>("#000000");
-  const [displayScale, setDisplayScale] = useState<number>(1);
+  const [displayScale, setDisplayScale] = useState<number>(INITIAL_SCALE);
   const [hoverPixel, setHoverPixel] = useState<PixelCoord | null>(null);
+  const [cooldownRemaining, setCooldownRemaining] = useState<number>(0);
 
-  const scaleRef = useRef<number>(1);
+  const scaleRef = useRef<number>(INITIAL_SCALE);
   const offsetRef = useRef<PixelCoord>({ x: 0, y: 0 });
   const isDraggingRef = useRef<boolean>(false);
   const hasDraggedRef = useRef<boolean>(false);
@@ -67,10 +52,29 @@ const PixelCanvas: React.FC = () => {
       }
     );
 
+    socket.on("canvas-state", (canvas: Record<string, string>) => {
+      const newMap = new Map<string, string>(Object.entries(canvas));
+      setPixels(newMap);
+    });
+
+    socket.on("cooldown", ({ remaining }: { remaining: number }) => {
+      setCooldownRemaining(remaining);
+    });
+
     return () => {
       socket.disconnect();
     };
   }, []);
+
+  useEffect(() => {
+    if (cooldownRemaining <= 0) return;
+
+    const interval = setInterval(() => {
+      setCooldownRemaining((prev) => Math.max(prev - 100, 0));
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [cooldownRemaining]);
 
   const updateScale = (newScale: number) => {
     scaleRef.current = newScale;
@@ -122,10 +126,13 @@ const PixelCanvas: React.FC = () => {
 
   const centerCanvas = () => {
     const canvas = canvasRef.current;
+
     if (!canvas) return;
+    updateScale(INITIAL_SCALE);
+
     offsetRef.current = {
-      x: (canvas.width - CANVAS_WIDTH * scaleRef.current) / 2,
-      y: (canvas.height - CANVAS_HEIGHT * scaleRef.current) / 2,
+      x: (canvas.width - CANVAS_WIDTH * INITIAL_SCALE) / 2,
+      y: (canvas.height - CANVAS_HEIGHT * INITIAL_SCALE) / 2,
     };
   };
 
@@ -200,13 +207,16 @@ const PixelCanvas: React.FC = () => {
   };
 
   const handleClick = () => {
-    if (hasDraggedRef.current || !hoverPixel) return;
-    const key = `${hoverPixel.x}:${hoverPixel.y}`;
+    if (cooldownRemaining > 0 || hasDraggedRef.current || !hoverPixel) return;
+
+    /*
+        const key = `${hoverPixel.x}:${hoverPixel.y}`;
+
     setPixels((prev) => {
       const newMap = new Map(prev);
       newMap.set(key, selectedColor);
       return newMap;
-    });
+    });*/
 
     socketRef.current?.emit("place-pixel", {
       x: hoverPixel.x,
@@ -346,6 +356,11 @@ const PixelCanvas: React.FC = () => {
       <div className="absolute top-2 left-1/2 transform -translate-x-1/2 bg-white/80 px-3 py-1 rounded font-bold z-10">
         Zoom: {Math.round(displayScale * 100) / 100}x
       </div>
+      {cooldownRemaining > 0 && (
+        <div className="absolute top-2 left-2 bg-red-500 text-white text-sm px-3 py-1 rounded shadow z-10">
+          Cooldown: {(cooldownRemaining / 1000).toFixed(1)}s
+        </div>
+      )}
     </div>
   );
 };
