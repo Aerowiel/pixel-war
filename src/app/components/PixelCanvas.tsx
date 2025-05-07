@@ -9,6 +9,8 @@ import {
   INITIAL_SCALE,
 } from "../../../lib/constants";
 
+const GRID_SCALE_THRESHOLD = 10;
+
 interface PixelCoord {
   x: number;
   y: number;
@@ -120,8 +122,31 @@ const PixelCanvas: React.FC = () => {
     });
 
     drawHoverPixel(ctx);
+    drawGrid(ctx);
 
     ctx.restore();
+  };
+
+  const drawGrid = (ctx: CanvasRenderingContext2D) => {
+    if (scaleRef.current < GRID_SCALE_THRESHOLD) return;
+
+    ctx.beginPath();
+    ctx.strokeStyle = "#cccccc"; // light gray
+    ctx.lineWidth = 1 / scaleRef.current;
+
+    // Vertical lines
+    for (let x = 0; x <= CANVAS_WIDTH; x++) {
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, CANVAS_HEIGHT);
+    }
+
+    // Horizontal lines
+    for (let y = 0; y <= CANVAS_HEIGHT; y++) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(CANVAS_WIDTH, y);
+    }
+
+    ctx.stroke();
   };
 
   const centerCanvas = () => {
