@@ -79,21 +79,23 @@ app.prepare().then(() => {
         console.log("valid color");
 
         // === Cooldown check ===
-        console.log("cooldown check");
-        const cooldownKey = `cooldown:${ip}`;
-        const onCooldown = await pub.get(cooldownKey);
-        const ttl = await pub.pttl(cooldownKey); // in ms
-        console.log({ ttl });
+        if (COOLDOWN_IN_MS !== 0) {
+          console.log("cooldown check");
+          const cooldownKey = `cooldown:${ip}`;
+          const onCooldown = await pub.get(cooldownKey);
+          const ttl = await pub.pttl(cooldownKey); // in ms
+          console.log({ ttl });
 
-        console.log({ onCooldown });
-        if (onCooldown) {
-          const ttl = await pub.pttl(cooldownKey);
-          socket.emit("cooldown", { remaining: ttl });
-          return;
+          console.log({ onCooldown });
+          if (onCooldown) {
+            const ttl = await pub.pttl(cooldownKey);
+            socket.emit("cooldown", { remaining: ttl });
+            return;
+          }
+
+          await pub.set(cooldownKey, "1", "PX", COOLDOWN_IN_MS); // 0.5s cooldown
+          socket.emit("cooldown", { remaining: COOLDOWN_IN_MS });
         }
-
-        await pub.set(cooldownKey, "1", "PX", COOLDOWN_IN_MS); // 0.5s cooldown
-        socket.emit("cooldown", { remaining: COOLDOWN_IN_MS });
 
         const redisKey = `${x}:${y}`;
 

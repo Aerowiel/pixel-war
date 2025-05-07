@@ -36,6 +36,7 @@ const PixelCanvas: React.FC = () => {
 
   const lastTouchDistanceRef = useRef<number | null>(null);
   const lastTouchMidpointRef = useRef<PixelCoord | null>(null);
+  const isTouchDevice = useRef<boolean>(false);
 
   useEffect(() => {
     const socket = io("/", { transports: ["websocket"] }); // or io("http://localhost:3000") if custom URL
@@ -84,7 +85,7 @@ const PixelCanvas: React.FC = () => {
   };
 
   const drawHoverPixel = (ctx: CanvasRenderingContext2D) => {
-    if (!hoverPixel) return;
+    if (!hoverPixel || isTouchDevice.current) return;
     ctx.strokeStyle = selectedColor;
     ctx.lineWidth = 1 / scaleRef.current;
     ctx.strokeRect(hoverPixel.x, hoverPixel.y, 1, 1);
@@ -206,6 +207,8 @@ const PixelCanvas: React.FC = () => {
   };
 
   const handleMouseMove = (e: MouseEvent) => {
+    isTouchDevice.current = false;
+
     const rect = canvasRef.current!.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
@@ -231,26 +234,28 @@ const PixelCanvas: React.FC = () => {
     isDraggingRef.current = false;
   };
 
-  const handleClick = () => {
-    if (cooldownRemaining > 0 || hasDraggedRef.current || !hoverPixel) return;
+  const handleClick = (e: MouseEvent) => {
+    if (cooldownRemaining > 0 || hasDraggedRef.current) return;
 
-    /*
-        const key = `${hoverPixel.x}:${hoverPixel.y}`;
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
 
-    setPixels((prev) => {
-      const newMap = new Map(prev);
-      newMap.set(key, selectedColor);
-      return newMap;
-    });*/
+    const x = Math.floor((mouseX - offsetRef.current.x) / scaleRef.current);
+    const y = Math.floor((mouseY - offsetRef.current.y) / scaleRef.current);
+
+    if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
 
     socketRef.current?.emit("place-pixel", {
-      x: hoverPixel.x,
-      y: hoverPixel.y,
+      x,
+      y,
       color: selectedColor,
     });
   };
 
   const handleTouchStart = (e: TouchEvent) => {
+    isTouchDevice.current = true;
+
     if (e.touches.length === 1) {
       isDraggingRef.current = true;
       hasDraggedRef.current = false;
@@ -307,10 +312,29 @@ const PixelCanvas: React.FC = () => {
     }
   };
 
-  const handleTouchEnd = () => {
+  const handleTouchEnd = (e: TouchEvent) => {
     isDraggingRef.current = false;
     lastTouchDistanceRef.current = null;
     lastTouchMidpointRef.current = null;
+
+    if (cooldownRemaining > 0 || hasDraggedRef.current) return;
+
+    const touch = e.changedTouches[0];
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const x = Math.floor(
+      (touch.clientX - rect.left - offsetRef.current.x) / scaleRef.current
+    );
+    const y = Math.floor(
+      (touch.clientY - rect.top - offsetRef.current.y) / scaleRef.current
+    );
+
+    if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
+
+    socketRef.current?.emit("place-pixel", {
+      x,
+      y,
+      color: selectedColor,
+    });
   };
 
   useEffect(() => {
