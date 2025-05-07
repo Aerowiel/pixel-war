@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   app:
     image: node:20
@@ -8,4 +10,12 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=development
+      - REDIS_URL=redis://redis:6379
     command: npm run dev
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
