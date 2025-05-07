@@ -3,7 +3,7 @@ export const CANVAS_HEIGHT = 1000;
 export const INITIAL_SCALE = 1;
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 30;
-export const COOLDOWN_IN_MS = 0; // 10 * 1000;
+export const COOLDOWN_IN_MS = 5000; // 10 * 1000;
 
 export const COLOR_PALETTE = [
   "#FFFFFF",

@@ -7,7 +7,9 @@ import {
   MIN_SCALE,
   MAX_SCALE,
   INITIAL_SCALE,
+  COOLDOWN_IN_MS,
 } from "../../../lib/constants";
+import { useSearchParams } from "next/navigation";
 
 const GRID_SCALE_THRESHOLD = 10;
 
@@ -67,6 +69,43 @@ const PixelCanvas: React.FC = () => {
     return () => {
       socket.disconnect();
     };
+  }, []);
+
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const x = parseInt(searchParams.get("x") || "");
+    const y = parseInt(searchParams.get("y") || "");
+    const zoom = parseFloat(searchParams.get("zoom") || "");
+
+    const isValidCoord = (val: number) =>
+      typeof val === "number" && !isNaN(val);
+
+    if (
+      isValidCoord(x) &&
+      isValidCoord(y) &&
+      x >= 0 &&
+      y >= 0 &&
+      x < CANVAS_WIDTH &&
+      y < CANVAS_HEIGHT
+    ) {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const scale =
+        zoom >= MIN_SCALE && zoom <= MAX_SCALE ? zoom : INITIAL_SCALE;
+      updateScale(scale);
+
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+
+      offsetRef.current = {
+        x: centerX - x * scale,
+        y: centerY - y * scale,
+      };
+
+      drawCanvas();
+    }
   }, []);
 
   useEffect(() => {
@@ -234,7 +273,7 @@ const PixelCanvas: React.FC = () => {
     isDraggingRef.current = false;
   };
 
-  const handleClick = (e: MouseEvent) => {
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement, MouseEvent>) => {
     if (cooldownRemaining > 0 || hasDraggedRef.current) return;
 
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -371,45 +410,46 @@ const PixelCanvas: React.FC = () => {
 
   return (
     <div className="w-screen h-screen overflow-hidden relative">
-      <div className="fixed bottom-0 left-0 w-full bg-white px-4 py-2 flex justify-center flex-wrap gap-2 border-t border-gray-300 z-10">
-        {COLOR_PALETTE.map((color) => (
-          <div
-            key={color}
-            onClick={() => setSelectedColor(color)}
-            className={`w-8 h-8 rounded cursor-pointer border ${
-              selectedColor === color
-                ? "border-black border-2"
-                : "border-gray-400"
-            }`}
-            style={{ backgroundColor: color }}
-          />
-        ))}
+      {/* Overlay UI */}
+      <div className="absolute bottom-3 left-0 right-0 z-10 pointer-events-auto px-4 flex justify-center">
+        <div className="w-fit flex flex-col items-center gap-2 bg-white/80 backdrop-blur-md px-4 py-3 rounded-xl shadow">
+          {/* Cooldown Bar */}
+          {cooldownRemaining > 0 && (
+            <div className="w-full h-2 bg-gray-200 rounded overflow-hidden">
+              <div
+                className="h-full bg-red-500 transition-all duration-100 ease-linear"
+                style={{
+                  width: `${(cooldownRemaining / COOLDOWN_IN_MS) * 100}%`, // Replace 2000 with your actual cooldown
+                }}
+              />
+            </div>
+          )}
+
+          {/* Color Palette */}
+          <div className="w-fit flex flex-wrap justify-center gap-2">
+            {COLOR_PALETTE.map((color) => (
+              <button
+                key={color}
+                onClick={() => setSelectedColor(color)}
+                className={`w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 cursor-pointer border ${
+                  selectedColor === color
+                    ? "border-black border-2"
+                    : "border-gray-300"
+                }`}
+                style={{ backgroundColor: color }}
+                aria-label={`Select color ${color}`}
+              />
+            ))}
+          </div>
+        </div>
       </div>
 
-      <button
-        onClick={() => {
-          centerCanvas();
-          drawCanvas();
-        }}
-        className="cursor-pointer fixed top-4 right-4 z-20 bg-white border border-gray-300 text-sm rounded-md px-4 py-2 font-medium shadow-md hover:bg-gray-100 transition"
-      >
-        Center
-      </button>
-
+      {/* Canvas */}
       <canvas
         ref={canvasRef}
         className="w-full h-full block cursor-crosshair"
         onClick={handleClick}
       />
-
-      <div className="absolute top-2 left-1/2 transform -translate-x-1/2 bg-white/80 px-3 py-1 rounded font-bold z-10">
-        Zoom: {Math.round(displayScale * 100) / 100}x
-      </div>
-      {cooldownRemaining > 0 && (
-        <div className="absolute top-2 left-2 bg-red-500 text-white text-sm px-3 py-1 rounded shadow z-10">
-          Cooldown: {(cooldownRemaining / 1000).toFixed(1)}s
-        </div>
-      )}
     </div>
   );
 };
