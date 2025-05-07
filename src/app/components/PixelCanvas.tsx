@@ -7,8 +7,8 @@ import {
   MIN_SCALE,
   MAX_SCALE,
   INITIAL_SCALE,
-  COOLDOWN_IN_MS,
 } from "../../../lib/constants";
+
 import { useSearchParams } from "next/navigation";
 
 const GRID_SCALE_THRESHOLD = 10;
@@ -28,7 +28,14 @@ const PixelCanvas: React.FC = () => {
   const [selectedColor, setSelectedColor] = useState<string>("#000000");
   const [displayScale, setDisplayScale] = useState<number>(INITIAL_SCALE);
   const [hoverPixel, setHoverPixel] = useState<PixelCoord | null>(null);
-  const [cooldownRemaining, setCooldownRemaining] = useState<number>(0);
+  const [cooldown, setCooldown] = useState<{
+    remaining: number;
+    total: number;
+  }>({
+    remaining: 0,
+    total: 0,
+  });
+  const [centerCoord, setCenterCoord] = useState<PixelCoord>({ x: 0, y: 0 });
 
   const scaleRef = useRef<number>(INITIAL_SCALE);
   const offsetRef = useRef<PixelCoord>({ x: 0, y: 0 });
@@ -39,6 +46,30 @@ const PixelCanvas: React.FC = () => {
   const lastTouchDistanceRef = useRef<number | null>(null);
   const lastTouchMidpointRef = useRef<PixelCoord | null>(null);
   const isTouchDevice = useRef<boolean>(false);
+
+  const searchParams = useSearchParams();
+
+  const [userCount, setUserCount] = useState<number>(0);
+
+  const updateUrlWithCoordinates = () => {
+    const centerX = Math.floor(
+      (window.innerWidth / 2 - offsetRef.current.x) / scaleRef.current
+    );
+    const centerY = Math.floor(
+      (window.innerHeight / 2 - offsetRef.current.y) / scaleRef.current
+    );
+    const zoom = Math.round(scaleRef.current * 100) / 100;
+
+    const params = new URLSearchParams();
+    params.set("x", centerX.toString());
+    params.set("y", centerY.toString());
+    params.set("z", zoom.toString());
+
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, "", newUrl); // ✅ no reload, no GET
+
+    setCenterCoord({ x: centerX, y: centerY });
+  };
 
   useEffect(() => {
     const socket = io("/", { transports: ["websocket"] }); // or io("http://localhost:3000") if custom URL
@@ -62,8 +93,15 @@ const PixelCanvas: React.FC = () => {
       setPixels(newMap);
     });
 
-    socket.on("cooldown", ({ remaining }: { remaining: number }) => {
-      setCooldownRemaining(remaining);
+    socket.on(
+      "cooldown",
+      ({ remaining, total }: { remaining: number; total: number }) => {
+        setCooldown({ remaining, total });
+      }
+    );
+
+    socket.on("user-count", (count: number) => {
+      setUserCount(count);
     });
 
     return () => {
@@ -71,26 +109,22 @@ const PixelCanvas: React.FC = () => {
     };
   }, []);
 
-  const searchParams = useSearchParams();
-
   useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
     const x = parseInt(searchParams.get("x") || "");
     const y = parseInt(searchParams.get("y") || "");
-    const zoom = parseFloat(searchParams.get("zoom") || "");
+    const zoom = parseFloat(searchParams.get("z") || "");
 
     const isValidCoord = (val: number) =>
       typeof val === "number" && !isNaN(val);
 
-    if (
-      isValidCoord(x) &&
-      isValidCoord(y) &&
-      x >= 0 &&
-      y >= 0 &&
-      x < CANVAS_WIDTH &&
-      y < CANVAS_HEIGHT
-    ) {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+    if (isValidCoord(x) && isValidCoord(y) && x >= 0 && y >= 0) {
+      setCenterCoord({ x, y });
 
       const scale =
         zoom >= MIN_SCALE && zoom <= MAX_SCALE ? zoom : INITIAL_SCALE;
@@ -103,20 +137,37 @@ const PixelCanvas: React.FC = () => {
         x: centerX - x * scale,
         y: centerY - y * scale,
       };
+    } else {
+      const centerCanvas = () => {
+        const canvas = canvasRef.current;
 
-      drawCanvas();
+        if (!canvas) return;
+        updateScale(INITIAL_SCALE);
+
+        offsetRef.current = {
+          x: (canvas.width - CANVAS_WIDTH * INITIAL_SCALE) / 2,
+          y: (canvas.height - CANVAS_HEIGHT * INITIAL_SCALE) / 2,
+        };
+      };
+
+      centerCanvas(); // fallback
     }
+
+    drawCanvas();
   }, []);
 
   useEffect(() => {
-    if (cooldownRemaining <= 0) return;
+    if (cooldown.remaining <= 0) return;
 
     const interval = setInterval(() => {
-      setCooldownRemaining((prev) => Math.max(prev - 100, 0));
+      setCooldown((prev) => ({
+        ...prev,
+        remaining: Math.max(prev.remaining - 100, 0),
+      }));
     }, 100);
 
     return () => clearInterval(interval);
-  }, [cooldownRemaining]);
+  }, [cooldown.remaining]);
 
   const updateScale = (newScale: number) => {
     scaleRef.current = newScale;
@@ -163,6 +214,7 @@ const PixelCanvas: React.FC = () => {
 
     drawHoverPixel(ctx);
     drawGrid(ctx);
+    // updateUrlWithView();
 
     ctx.restore();
   };
@@ -188,27 +240,6 @@ const PixelCanvas: React.FC = () => {
 
     ctx.stroke();
   };
-
-  const centerCanvas = () => {
-    const canvas = canvasRef.current;
-
-    if (!canvas) return;
-    updateScale(INITIAL_SCALE);
-
-    offsetRef.current = {
-      x: (canvas.width - CANVAS_WIDTH * INITIAL_SCALE) / 2,
-      y: (canvas.height - CANVAS_HEIGHT * INITIAL_SCALE) / 2,
-    };
-  };
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    centerCanvas();
-    drawCanvas();
-  }, []);
 
   useEffect(() => {
     pixelsRef.current = pixels;
@@ -237,6 +268,7 @@ const PixelCanvas: React.FC = () => {
 
     updateScale(newScale);
     drawCanvas();
+    updateUrlWithCoordinates();
   };
 
   const handleMouseDown = (e: MouseEvent) => {
@@ -271,10 +303,11 @@ const PixelCanvas: React.FC = () => {
 
   const handleMouseUp = () => {
     isDraggingRef.current = false;
+    updateUrlWithCoordinates();
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement, MouseEvent>) => {
-    if (cooldownRemaining > 0 || hasDraggedRef.current) return;
+    if (cooldown.remaining > 0 || hasDraggedRef.current) return;
 
     const rect = canvasRef.current!.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -356,7 +389,9 @@ const PixelCanvas: React.FC = () => {
     lastTouchDistanceRef.current = null;
     lastTouchMidpointRef.current = null;
 
-    if (cooldownRemaining > 0 || hasDraggedRef.current) return;
+    updateUrlWithCoordinates();
+
+    if (cooldown.remaining > 0 || hasDraggedRef.current) return;
 
     const touch = e.changedTouches[0];
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -410,23 +445,42 @@ const PixelCanvas: React.FC = () => {
 
   return (
     <div className="w-screen h-screen overflow-hidden relative">
-      {/* Overlay UI */}
-      <div className="absolute bottom-3 left-0 right-0 z-10 pointer-events-auto px-4 flex justify-center">
+      {/* Connected Users (Top-Left) */}
+      <div className="absolute top-3 left-3 z-10 pointer-events-auto">
+        <div className="bg-white/80 backdrop-blur px-3 py-1 rounded-full shadow text-sm text-gray-800">
+          {userCount} online
+        </div>
+      </div>
+      <div className="absolute top-3 left-1/2 transform -translate-x-1/2 z-10 pointer-events-auto">
+        <div className="flex items-center bg-white/80 backdrop-blur px-4 py-2 rounded-full shadow text-sm font-medium">
+          {`(${centerCoord.x}, ${centerCoord.y}) ${
+            Math.round(displayScale * 100) / 100
+          }x`}
+        </div>
+      </div>
+      {/* Bottom UI */}
+      <div className="fixed bottom-4 left-0 right-0 z-10 pointer-events-auto px-4 flex justify-center">
         <div className="w-fit flex flex-col items-center gap-2 bg-white/80 backdrop-blur-md px-4 py-3 rounded-xl shadow">
           {/* Cooldown Bar */}
-          {cooldownRemaining > 0 && (
-            <div className="w-full h-2 bg-gray-200 rounded overflow-hidden">
+          {cooldown.remaining > 0 && (
+            <div className="w-full h-2 bg-gray-300 rounded overflow-hidden">
               <div
                 className="h-full bg-red-500 transition-all duration-100 ease-linear"
                 style={{
-                  width: `${(cooldownRemaining / COOLDOWN_IN_MS) * 100}%`, // Replace 2000 with your actual cooldown
+                  width:
+                    cooldown.total > 0
+                      ? `${Math.max(
+                          0,
+                          (cooldown.remaining / cooldown.total) * 100
+                        )}%`
+                      : "0%",
                 }}
               />
             </div>
           )}
 
           {/* Color Palette */}
-          <div className="w-fit flex flex-wrap justify-center gap-2">
+          <div className="flex flex-wrap justify-center gap-2 w-full">
             {COLOR_PALETTE.map((color) => (
               <button
                 key={color}

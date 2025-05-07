@@ -3,22 +3,22 @@ export const CANVAS_HEIGHT = 1000;
 export const INITIAL_SCALE = 1;
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 30;
-export const COOLDOWN_IN_MS = 5000; // 10 * 1000;
+export const REDIS_COOLDOWN_KEY = "global:cooldown";
 
 export const COLOR_PALETTE = [
-  "#FFFFFF",
   "#000000",
-  "#FF4500",
-  "#FFA800",
-  "#FFD635",
-  "#00A368",
-  "#7EED56",
-  "#2450A4",
-  "#3690EA",
-  "#51E9F4",
-  "#811E9F",
-  "#B44AC0",
-  "#FF99AA",
-  "#9C6926",
-  "#6D482F",
+  "#898d90",
+  "#ffffff",
+  "#ff4500",
+  "#ffa800",
+  "#ffd635",
+  "#00a368",
+  "#7eed56",
+  "#2450a4",
+  "#3690ea",
+  "#51e9f4",
+  "#811e9f",
+  "#b44ac0",
+  "#ff99aa",
+  "#9c6926",
 ];

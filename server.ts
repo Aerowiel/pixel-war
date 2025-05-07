@@ -6,7 +6,7 @@ import {
   COLOR_PALETTE,
   CANVAS_WIDTH,
   CANVAS_HEIGHT,
-  COOLDOWN_IN_MS,
+  REDIS_COOLDOWN_KEY,
 } from "./lib/constants";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -20,6 +20,8 @@ console.log({ env: process.env.REDIS_URL });
 const pub = new Redis(redisUrl, { family: dev ? 4 : 6 });
 const sub = new Redis(redisUrl, { family: dev ? 4 : 6 });
 
+const connectedIps = new Set<string>();
+
 app.prepare().then(() => {
   const httpServer = createServer(handler);
   const io = new Server(httpServer, {
@@ -32,6 +34,9 @@ app.prepare().then(() => {
     const ip =
       (socket.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
       socket.handshake.address;
+
+    connectedIps.add(ip);
+    io.emit("user-count", connectedIps.size);
 
     console.log(`🧠 New client connected: ${socket.id} (IP: ${ip})`);
 
@@ -79,7 +84,12 @@ app.prepare().then(() => {
         console.log("valid color");
 
         // === Cooldown check ===
-        if (COOLDOWN_IN_MS !== 0) {
+        const currentCooldown = parseInt(
+          (await pub.get(REDIS_COOLDOWN_KEY)) || "5000",
+          10
+        );
+
+        if (currentCooldown !== 0) {
           console.log("cooldown check");
           const cooldownKey = `cooldown:${ip}`;
           const onCooldown = await pub.get(cooldownKey);
@@ -89,12 +99,15 @@ app.prepare().then(() => {
           console.log({ onCooldown });
           if (onCooldown) {
             const ttl = await pub.pttl(cooldownKey);
-            socket.emit("cooldown", { remaining: ttl });
+            socket.emit("cooldown", { remaining: ttl, total: currentCooldown });
             return;
           }
 
-          await pub.set(cooldownKey, "1", "PX", COOLDOWN_IN_MS); // 0.5s cooldown
-          socket.emit("cooldown", { remaining: COOLDOWN_IN_MS });
+          await pub.set(cooldownKey, "1", "PX", currentCooldown); // 0.5s cooldown
+          socket.emit("cooldown", {
+            remaining: currentCooldown,
+            total: currentCooldown,
+          });
         }
 
         const redisKey = `${x}:${y}`;
@@ -103,6 +116,20 @@ app.prepare().then(() => {
         await pub.publish("pixel", JSON.stringify({ x, y, color }));
       }
     );
+
+    socket.on("disconnect", () => {
+      // Remove the IP only if no other sockets from this IP remain
+      const stillConnected = Array.from(io.sockets.sockets.values()).some(
+        (s) =>
+          ((s.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
+            s.handshake.address) === ip
+      );
+
+      if (!stillConnected) {
+        connectedIps.delete(ip);
+        io.emit("user-count", connectedIps.size);
+      }
+    });
   });
 
   // Broadcast pixel placements to all clients
@@ -110,6 +137,15 @@ app.prepare().then(() => {
   sub.on("message", (channel, message) => {
     const pixel = JSON.parse(message);
     io.emit("pixel-placed", pixel);
+  });
+
+  sub.subscribe("cooldown:update");
+  sub.on("message", (channel, message) => {
+    if (channel === "cooldown:update") {
+      console.log("received cooldown update");
+      const newCooldown = parseInt(message, 10);
+      io.emit("cooldown-updated", { cooldown: newCooldown });
+    }
   });
 
   httpServer.listen(port, () => {

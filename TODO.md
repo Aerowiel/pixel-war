@@ -1,4 +1,1 @@
-- IMPROVE LAYOUT (palette, cooldown, etc...)
-- Implement connected count
 - Allow admin to change cooldown without having to redeploy
-- Implement initial popup (one time popup) with rules + accept button like "I swear i won't draw swastikas and dicks" and decline button like "I can't control myself" that will redirect the user somewhere funny
