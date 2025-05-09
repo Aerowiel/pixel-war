@@ -214,7 +214,6 @@ const PixelCanvas: React.FC = () => {
 
     drawHoverPixel(ctx);
     drawGrid(ctx);
-    // updateUrlWithView();
 
     ctx.restore();
   };
@@ -459,7 +458,7 @@ const PixelCanvas: React.FC = () => {
         </div>
       </div>
       {/* Bottom UI */}
-      <div className="fixed bottom-4 left-0 right-0 z-10 pointer-events-auto px-4 flex justify-center">
+      <div className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-0 right-0 z-10 pointer-events-auto px-4 flex justify-center">
         <div className="w-fit flex flex-col items-center gap-2 bg-white/80 backdrop-blur-md px-4 py-3 rounded-xl shadow">
           {/* Cooldown Bar */}
           {cooldown.remaining > 0 && (
