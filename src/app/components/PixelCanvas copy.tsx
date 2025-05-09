@@ -11,39 +11,36 @@ import {
 
 import { useSearchParams } from "next/navigation";
 
-const hexToABGR = (hex: string): number => {
-  hex = hex.replace(/^#/, "");
-  const rgb = parseInt(hex, 16);
-  const r = (rgb >> 16) & 0xff;
-  const g = (rgb >> 8) & 0xff;
-  const b = rgb & 0xff;
-  return (255 << 24) | (b << 16) | (g << 8) | r; // ABGR
-};
-
 const GRID_SCALE_THRESHOLD = 10;
-
-const DEFAULT_SELECTED_COLOR = COLOR_PALETTE[0];
 
 interface PixelCoord {
   x: number;
   y: number;
 }
 
+function hexToRgb(hex: string) {
+  const shorthand = /^#?([a-f\d])([a-f\d])([a-f\d])$/i;
+  hex = hex.replace(shorthand, (_, r, g, b) => r + r + g + g + b + b);
+
+  const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return match
+    ? {
+        r: parseInt(match[1], 16),
+        g: parseInt(match[2], 16),
+        b: parseInt(match[3], 16),
+      }
+    : { r: 0, g: 0, b: 0 };
+}
+
 const PixelCanvas: React.FC = () => {
   const socketRef = useRef<Socket | null>(null);
-  const requestAnimationFrameRef = useRef<number>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const pixelsRef = useRef<Map<string, string>>(new Map());
-  const hoverPixelRef = useRef<PixelCoord | null>(null);
-  const selectedColorRef = useRef<string>(DEFAULT_SELECTED_COLOR);
-
   const imageDataRef = useRef<ImageData | null>(null);
-  const imageUint32Ref = useRef<Uint32Array | null>(null);
+  const bufferCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [selectedColor, setSelectedColor] = useState<string>(
-    DEFAULT_SELECTED_COLOR
-  );
+  const [selectedColor, setSelectedColor] = useState<string>("#000000");
   const [displayScale, setDisplayScale] = useState<number>(INITIAL_SCALE);
+  const [hoverPixel, setHoverPixel] = useState<PixelCoord | null>(null);
   const [cooldown, setCooldown] = useState<{
     remaining: number;
     total: number;
@@ -55,7 +52,6 @@ const PixelCanvas: React.FC = () => {
 
   const scaleRef = useRef<number>(INITIAL_SCALE);
   const offsetRef = useRef<PixelCoord>({ x: 0, y: 0 });
-
   const isDraggingRef = useRef<boolean>(false);
   const hasDraggedRef = useRef<boolean>(false);
   const dragStartRef = useRef<PixelCoord>({ x: 0, y: 0 });
@@ -68,61 +64,56 @@ const PixelCanvas: React.FC = () => {
 
   const [userCount, setUserCount] = useState<number>(0);
 
-  const offscreenCanvas = document.createElement("canvas");
-  offscreenCanvas.width = CANVAS_WIDTH;
-  offscreenCanvas.height = CANVAS_HEIGHT;
-  const offscreenCtx = offscreenCanvas.getContext("2d")!;
+  const updateUrlWithCoordinates = () => {
+    const centerX = Math.floor(
+      (window.innerWidth / 2 - offsetRef.current.x) / scaleRef.current
+    );
+    const centerY = Math.floor(
+      (window.innerHeight / 2 - offsetRef.current.y) / scaleRef.current
+    );
+    const zoom = Math.round(scaleRef.current * 100) / 100;
 
-  /* Draw loop */
-  useEffect(() => {
-    requestAnimationFrameRef.current = requestAnimationFrame(drawCanvas);
-    return () => {
-      if (requestAnimationFrameRef.current) {
-        cancelAnimationFrame(requestAnimationFrameRef.current);
-      }
-    };
-  }, []);
+    const params = new URLSearchParams();
+    params.set("x", centerX.toString());
+    params.set("y", centerY.toString());
+    params.set("z", zoom.toString());
 
-  /* Socket */
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, "", newUrl); // ✅ no reload, no GET
+
+    setCenterCoord({ x: centerX, y: centerY });
+  };
+
   useEffect(() => {
-    const socket = io("/", { transports: ["websocket"] });
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    if (!imageDataRef.current) {
+      const buffer = new ImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
+      imageDataRef.current = buffer;
+    }
+
+    const socket = io("/");
     socketRef.current = socket;
 
-    socket.on(
-      "pixel-placed",
-      ({ x, y, color }: { x: number; y: number; color: string }) => {
-        const key = `${x}:${y}`;
-        pixelsRef.current.set(key, color);
-
-        const index = y * CANVAS_WIDTH + x;
-        const abgr = hexToABGR(color);
-
-        if (imageUint32Ref.current && imageDataRef.current) {
-          imageUint32Ref.current[index] = abgr;
-          offscreenCtx.putImageData(imageDataRef.current, 0, 0);
-        } else {
-          // fallback if image buffer not initialized
-          renderPixelsToOffscreen();
-        }
+    socket.on("canvas-state", (pixels: Record<string, string>) => {
+      for (const [key, color] of Object.entries(pixels)) {
+        const [x, y] = key.split(":").map(Number);
+        setPixelInBuffer(x, y, color);
       }
-    );
-
-    socket.on("canvas-state", (canvas: Record<string, string>) => {
-      const newMap = new Map<string, string>(Object.entries(canvas));
-      pixelsRef.current = newMap;
-      renderPixelsToOffscreen();
+      drawCanvas();
     });
 
-    socket.on(
-      "cooldown",
-      ({ remaining, total }: { remaining: number; total: number }) => {
-        setCooldown({ remaining, total });
-      }
-    );
-
-    socket.on("user-count", (count: number) => {
-      setUserCount(count);
+    socket.on("pixel-placed", ({ x, y, color }) => {
+      setPixelInBuffer(x, y, color);
+      drawCanvas();
     });
+
+    socket.on("cooldown", setCooldown);
+    socket.on("user-count", setUserCount);
 
     return () => {
       socket.disconnect();
@@ -172,6 +163,8 @@ const PixelCanvas: React.FC = () => {
 
       centerCanvas(); // fallback
     }
+
+    drawCanvas();
   }, []);
 
   useEffect(() => {
@@ -187,84 +180,43 @@ const PixelCanvas: React.FC = () => {
     return () => clearInterval(interval);
   }, [cooldown.remaining]);
 
-  useEffect(() => {
-    selectedColorRef.current = selectedColor;
-  }, [selectedColor]);
-
-  const updateUrlWithCoordinates = () => {
-    const centerX = Math.floor(
-      (window.innerWidth / 2 - offsetRef.current.x) / scaleRef.current
-    );
-    const centerY = Math.floor(
-      (window.innerHeight / 2 - offsetRef.current.y) / scaleRef.current
-    );
-    const zoom = Math.round(scaleRef.current * 100) / 100;
-
-    const params = new URLSearchParams();
-    params.set("x", centerX.toString());
-    params.set("y", centerY.toString());
-    params.set("z", zoom.toString());
-
-    const newUrl = `${window.location.pathname}?${params.toString()}`;
-    window.history.replaceState({}, "", newUrl); // ✅ no reload, no GET
-
-    setCenterCoord({ x: centerX, y: centerY });
-  };
-
   const updateScale = (newScale: number) => {
     scaleRef.current = newScale;
     setDisplayScale(newScale);
   };
 
-  const drawHoverPixel = (ctx: CanvasRenderingContext2D) => {
-    if (!hoverPixelRef.current || isTouchDevice.current) return;
-    const hoverPixel = hoverPixelRef.current;
-
-    ctx.strokeStyle = selectedColorRef.current;
-    ctx.lineWidth = 1 / scaleRef.current;
-    ctx.strokeRect(hoverPixel.x, hoverPixel.y, 1, 1);
-    ctx.fillStyle = selectedColorRef.current + "33";
-    ctx.fillRect(hoverPixel.x, hoverPixel.y, 1, 1);
+  const setPixelInBuffer = (x: number, y: number, color: string) => {
+    if (!imageDataRef.current) return;
+    const index = (y * CANVAS_WIDTH + x) * 4;
+    const { r, g, b } = hexToRgb(color);
+    const data = imageDataRef.current.data;
+    data[index] = r;
+    data[index + 1] = g;
+    data[index + 2] = b;
+    data[index + 3] = 255;
   };
 
-  const renderPixelsToOffscreen = () => {
-    const imageData = offscreenCtx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
-    const uint32View = new Uint32Array(imageData.data.buffer);
-
-    pixelsRef.current.forEach((color, key) => {
-      const [x, y] = key.split(":").map(Number);
-      const index = y * CANVAS_WIDTH + x;
-      uint32View[index] = hexToABGR(color);
-    });
-
-    imageDataRef.current = imageData;
-    imageUint32Ref.current = uint32View;
-
-    offscreenCtx.putImageData(imageData, 0, 0);
+  const drawHoverPixel = (ctx: CanvasRenderingContext2D) => {
+    if (!hoverPixel || isTouchDevice.current) return;
+    ctx.strokeStyle = selectedColor;
+    ctx.lineWidth = 1 / scaleRef.current;
+    ctx.strokeRect(hoverPixel.x, hoverPixel.y, 1, 1);
+    ctx.fillStyle = selectedColor + "33";
+    ctx.fillRect(hoverPixel.x, hoverPixel.y, 1, 1);
   };
 
   const drawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx || !imageDataRef.current) return;
 
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
+    console.log("draw canvas");
 
     ctx.save();
-
-    // Reset transform
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#f1f1f1";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Apply pan and zoom
     ctx.setTransform(
       scaleRef.current,
       0,
@@ -274,27 +226,17 @@ const PixelCanvas: React.FC = () => {
       offsetRef.current.y
     );
 
-    // White background
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    // Prevent blurry image
-    ctx.imageSmoothingEnabled = false;
-
-    // Draw pre-rendered pixels
-    ctx.drawImage(offscreenCanvas, 0, 0);
-
-    // Grid and hover pixel overlays
+    ctx.putImageData(imageDataRef.current, 0, 0);
     drawHoverPixel(ctx);
-    drawGrid(ctx);
-
+    // drawGrid(ctx);
     ctx.restore();
-
-    requestAnimationFrame(drawCanvas);
   };
 
   const drawGrid = (ctx: CanvasRenderingContext2D) => {
-    if (scaleRef.current < GRID_SCALE_THRESHOLD) return;
+    //if (scaleRef.current < GRID_SCALE_THRESHOLD) return;
 
     ctx.beginPath();
     ctx.strokeStyle = "#cccccc"; // light gray
@@ -314,6 +256,10 @@ const PixelCanvas: React.FC = () => {
 
     ctx.stroke();
   };
+
+  useEffect(() => {
+    drawCanvas();
+  }, [hoverPixel, displayScale]);
 
   const handleWheel = (e: WheelEvent) => {
     e.preventDefault();
@@ -336,45 +282,30 @@ const PixelCanvas: React.FC = () => {
     offsetRef.current.y = mouseY - worldY * newScale;
 
     updateScale(newScale);
-    updateUrlWithCoordinates();
+    drawCanvas();
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleMouseDown = (e: MouseEvent) => {
+    isDraggingRef.current = true;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseMove = (e: MouseEvent) => {
+    if (!isDraggingRef.current) return;
+
+    offsetRef.current.x += e.clientX - dragStartRef.current.x;
+    offsetRef.current.y += e.clientY - dragStartRef.current.y;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
 
-    /* If right click */
-    if (e.button === 2) isDraggingRef.current = true;
-  };
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    isTouchDevice.current = false;
-
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    if (!isDraggingRef.current) {
-      const x = Math.floor((mouseX - offsetRef.current.x) / scaleRef.current);
-      const y = Math.floor((mouseY - offsetRef.current.y) / scaleRef.current);
-
-      hoverPixelRef.current =
-        x >= 0 && y >= 0 && x < CANVAS_WIDTH && y < CANVAS_HEIGHT
-          ? { x, y }
-          : null;
-    } else {
-      offsetRef.current.x += e.clientX - dragStartRef.current.x;
-      offsetRef.current.y += e.clientY - dragStartRef.current.y;
-      dragStartRef.current = { x: e.clientX, y: e.clientY };
-    }
+    drawCanvas();
   };
 
   const handleMouseUp = () => {
     isDraggingRef.current = false;
-    updateUrlWithCoordinates();
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement, MouseEvent>) => {
-    if (cooldown.remaining > 0) return;
+    if (cooldown.remaining > 0 || hasDraggedRef.current) return;
 
     const rect = canvasRef.current!.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -413,14 +344,12 @@ const PixelCanvas: React.FC = () => {
       offsetRef.current.y += touch.clientY - dragStartRef.current.y;
       dragStartRef.current = { x: touch.clientX, y: touch.clientY };
       hasDraggedRef.current = true;
+      drawCanvas();
     }
 
     if (e.touches.length === 2) {
       e.preventDefault();
-      hasDraggedRef.current = true;
-
-      const touches = Array.from(e.touches);
-      const [t1, t2] = touches;
+      const [t1, t2] = e.touches;
       const dx = t2.clientX - t1.clientX;
       const dy = t2.clientY - t1.clientY;
       const distance = Math.hypot(dx, dy);
@@ -445,6 +374,7 @@ const PixelCanvas: React.FC = () => {
         offsetRef.current.y = midpoint.y - worldY * newScale;
 
         updateScale(newScale);
+        drawCanvas();
       }
 
       lastTouchDistanceRef.current = distance;
@@ -452,7 +382,7 @@ const PixelCanvas: React.FC = () => {
     }
   };
 
-  const handleTouchEnd = (e: React.TouchEvent) => {
+  const handleTouchEnd = (e: TouchEvent) => {
     isDraggingRef.current = false;
     lastTouchDistanceRef.current = null;
     lastTouchMidpointRef.current = null;
@@ -483,14 +413,31 @@ const PixelCanvas: React.FC = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    canvas.addEventListener("wheel", handleWheel);
+    canvas.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
     canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
     canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
-    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    canvas.addEventListener("touchend", handleTouchEnd);
+
+    const handleResize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      drawCanvas();
+    };
+
+    window.addEventListener("resize", handleResize);
 
     return () => {
+      canvas.removeEventListener("wheel", handleWheel);
+      canvas.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("resize", handleResize);
       canvas.removeEventListener("touchstart", handleTouchStart);
       canvas.removeEventListener("touchmove", handleTouchMove);
-      canvas.removeEventListener("wheel", handleWheel);
+      canvas.removeEventListener("touchend", handleTouchEnd);
     };
   }, []);
 
@@ -550,16 +497,13 @@ const PixelCanvas: React.FC = () => {
       </div>
 
       {/* Canvas */}
-      <canvas
-        ref={canvasRef}
-        className="w-full h-full block cursor-crosshair"
-        onClick={handleClick}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onTouchEnd={handleTouchEnd}
-        onContextMenu={(e) => e.preventDefault()}
-      />
+      <div>
+        <canvas
+          ref={canvasRef}
+          className="w-full h-full block cursor-crosshair"
+          onClick={handleClick}
+        />
+      </div>
     </div>
   );
 };
