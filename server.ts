@@ -16,11 +16,20 @@ const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
 
 const redisUrl = process.env.REDIS_URL || "redis://redis:6379";
-console.log({ env: process.env.REDIS_URL });
+
 const pub = new Redis(redisUrl, { family: dev ? 4 : 6 });
 const sub = new Redis(redisUrl, { family: dev ? 4 : 6 });
 
-const connectedIps = new Set<string>();
+const users = new Map<
+  string,
+  {
+    pseudonym?: string;
+    pixelCount: number;
+    rate: { count: number; lastTimestamp: number };
+    connectedAt: number; // timestamp in ms
+  }
+>();
+const blacklist = new Set<string>(); // IPs banned for spamming
 
 app.prepare().then(() => {
   const httpServer = createServer(handler);
@@ -35,8 +44,14 @@ app.prepare().then(() => {
       (socket.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
       socket.handshake.address;
 
-    connectedIps.add(ip);
-    io.emit("user-count", connectedIps.size);
+    if (!users.has(ip)) {
+      users.set(ip, {
+        pixelCount: 0,
+        rate: { count: 0, lastTimestamp: Date.now() },
+        connectedAt: Date.now(),
+      });
+    }
+    io.emit("user-count", users.size);
 
     console.log(`🧠 New client connected: ${socket.id} (IP: ${ip})`);
 
@@ -57,6 +72,34 @@ app.prepare().then(() => {
     socket.on(
       "place-pixel",
       async (pixel: { x: number; y: number; color: string }) => {
+        if (blacklist.has(ip)) {
+          console.warn(`⛔ Blocked blacklisted IP: ${ip}`);
+          return;
+        }
+
+        // === Rate limiting check ===
+        const user = users.get(ip);
+        if (!user) return;
+
+        const now = Date.now();
+
+        if (now - user.rate.lastTimestamp > 1000) {
+          user.rate.count = 1;
+          user.rate.lastTimestamp = now;
+        } else {
+          user.rate.count += 1;
+          if (user.rate.count > 100) {
+            console.warn(`🚨 Blacklisting IP ${ip} for spamming`);
+            io.emit(
+              "chat-message",
+              `[SERVER] Blacklisting ${ip} for spamming pixels.`
+            );
+            blacklist.add(ip);
+            socket.disconnect(true); // Kick user
+            return;
+          }
+        }
+
         const { x, y, color } = pixel;
 
         // === Coordinate validation ===
@@ -69,19 +112,14 @@ app.prepare().then(() => {
           x >= CANVAS_WIDTH ||
           y >= CANVAS_HEIGHT
         ) {
-          console.log("invalid coordinate");
           return;
         }
-        console.log("valid coordinate");
 
         // === Color validation ===
-        console.log("color check");
         const colorIndex = COLOR_PALETTE.indexOf(color);
         if (colorIndex === -1) {
-          console.log("invalid color");
           return;
         }
-        console.log("valid color");
 
         // === Cooldown check ===
         const currentCooldown = parseInt(
@@ -90,13 +128,10 @@ app.prepare().then(() => {
         );
 
         if (currentCooldown !== 0) {
-          console.log("cooldown check");
           const cooldownKey = `cooldown:${ip}`;
           const onCooldown = await pub.get(cooldownKey);
           const ttl = await pub.pttl(cooldownKey); // in ms
-          console.log({ ttl });
 
-          console.log({ onCooldown });
           if (onCooldown) {
             const ttl = await pub.pttl(cooldownKey);
             socket.emit("cooldown", { remaining: ttl, total: currentCooldown });
@@ -114,6 +149,8 @@ app.prepare().then(() => {
 
         await pub.hset("canvas", redisKey, colorIndex.toString());
         await pub.publish("pixel", JSON.stringify({ x, y, color }));
+
+        user.pixelCount += 1;
       }
     );
 
@@ -126,8 +163,24 @@ app.prepare().then(() => {
       );
 
       if (!stillConnected) {
-        connectedIps.delete(ip);
-        io.emit("user-count", connectedIps.size);
+        users.delete(ip);
+        io.emit("user-count", users.size);
+      }
+    });
+
+    socket.on("set-pseudonym", (pseudo: string) => {
+      if (typeof pseudo === "string" && pseudo.length <= 15) {
+        const user = users.get(ip);
+        if (user) {
+          user.pseudonym = pseudo.trim();
+          console.log(`👤 IP ${ip} is now known as "${user.pseudonym}"`);
+        }
+      }
+    });
+
+    socket.on("chat-message", (msg: string) => {
+      if (typeof msg === "string" && msg.length < 200) {
+        io.emit("chat-message", msg);
       }
     });
   });

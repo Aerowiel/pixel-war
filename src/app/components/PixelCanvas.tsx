@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
 import { io, Socket } from "socket.io-client";
+import { useSearchParams } from "next/navigation";
 import {
   COLOR_PALETTE,
   CANVAS_WIDTH,
@@ -9,8 +10,11 @@ import {
   INITIAL_SCALE,
 } from "../../../lib/constants";
 
-import { useSearchParams } from "next/navigation";
+// Constants
+const GRID_SCALE_THRESHOLD = 10;
+const DEFAULT_SELECTED_COLOR = COLOR_PALETTE[0];
 
+// Utility Functions
 const hexToABGR = (hex: string): number => {
   hex = hex.replace(/^#/, "");
   const rgb = parseInt(hex, 16);
@@ -20,26 +24,38 @@ const hexToABGR = (hex: string): number => {
   return (255 << 24) | (b << 16) | (g << 8) | r; // ABGR
 };
 
-const GRID_SCALE_THRESHOLD = 10;
-
-const DEFAULT_SELECTED_COLOR = COLOR_PALETTE[0];
-
+// Types
 interface PixelCoord {
   x: number;
   y: number;
 }
 
 const PixelCanvas: React.FC = () => {
+  // Refs
   const socketRef = useRef<Socket | null>(null);
   const requestAnimationFrameRef = useRef<number>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const pixelsRef = useRef<Map<string, string>>(new Map());
   const hoverPixelRef = useRef<PixelCoord | null>(null);
   const selectedColorRef = useRef<string>(DEFAULT_SELECTED_COLOR);
-
   const imageDataRef = useRef<ImageData | null>(null);
   const imageUint32Ref = useRef<Uint32Array | null>(null);
+  const scaleRef = useRef<number>(INITIAL_SCALE);
+  const offsetRef = useRef<PixelCoord>({ x: 0, y: 0 });
+  const isDraggingRef = useRef<boolean>(false);
+  const hasDraggedRef = useRef<boolean>(false);
+  const dragStartRef = useRef<PixelCoord>({ x: 0, y: 0 });
+  const lastTouchDistanceRef = useRef<number | null>(null);
+  const lastTouchMidpointRef = useRef<PixelCoord | null>(null);
+  const isTouchDeviceRef = useRef<boolean>(false);
+  const isMouseDownRef = useRef<boolean>(false);
 
+  const offscreenCanvas = document.createElement("canvas");
+  offscreenCanvas.width = CANVAS_WIDTH;
+  offscreenCanvas.height = CANVAS_HEIGHT;
+  const offscreenCtx = offscreenCanvas.getContext("2d")!;
+
+  // States
   const [selectedColor, setSelectedColor] = useState<string>(
     DEFAULT_SELECTED_COLOR
   );
@@ -52,26 +68,15 @@ const PixelCanvas: React.FC = () => {
     total: 0,
   });
   const [centerCoord, setCenterCoord] = useState<PixelCoord>({ x: 0, y: 0 });
-
-  const scaleRef = useRef<number>(INITIAL_SCALE);
-  const offsetRef = useRef<PixelCoord>({ x: 0, y: 0 });
-
-  const isDraggingRef = useRef<boolean>(false);
-  const hasDraggedRef = useRef<boolean>(false);
-  const dragStartRef = useRef<PixelCoord>({ x: 0, y: 0 });
-
-  const lastTouchDistanceRef = useRef<number | null>(null);
-  const lastTouchMidpointRef = useRef<PixelCoord | null>(null);
-  const isTouchDevice = useRef<boolean>(false);
-
-  const searchParams = useSearchParams();
-
   const [userCount, setUserCount] = useState<number>(0);
 
-  const offscreenCanvas = document.createElement("canvas");
-  offscreenCanvas.width = CANVAS_WIDTH;
-  offscreenCanvas.height = CANVAS_HEIGHT;
-  const offscreenCtx = offscreenCanvas.getContext("2d")!;
+  // Admin
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+
+  // Hooks
+  const searchParams = useSearchParams();
+
+  // Initialization Effects
 
   /* Draw loop */
   useEffect(() => {
@@ -88,37 +93,11 @@ const PixelCanvas: React.FC = () => {
     const socket = io("/", { transports: ["websocket"] });
     socketRef.current = socket;
 
-    socket.on(
-      "pixel-placed",
-      ({ x, y, color }: { x: number; y: number; color: string }) => {
-        const key = `${x}:${y}`;
-        pixelsRef.current.set(key, color);
+    socket.on("pixel-placed", handlePixelPlaced);
 
-        const index = y * CANVAS_WIDTH + x;
-        const abgr = hexToABGR(color);
+    socket.on("canvas-state", handleCanvasState);
 
-        if (imageUint32Ref.current && imageDataRef.current) {
-          imageUint32Ref.current[index] = abgr;
-          offscreenCtx.putImageData(imageDataRef.current, 0, 0);
-        } else {
-          // fallback if image buffer not initialized
-          renderPixelsToOffscreen();
-        }
-      }
-    );
-
-    socket.on("canvas-state", (canvas: Record<string, string>) => {
-      const newMap = new Map<string, string>(Object.entries(canvas));
-      pixelsRef.current = newMap;
-      renderPixelsToOffscreen();
-    });
-
-    socket.on(
-      "cooldown",
-      ({ remaining, total }: { remaining: number; total: number }) => {
-        setCooldown({ remaining, total });
-      }
-    );
+    socket.on("cooldown", handleCooldown);
 
     socket.on("user-count", (count: number) => {
       setUserCount(count);
@@ -129,120 +108,60 @@ const PixelCanvas: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  useEffect(setupInitialCanvasPosition, []);
 
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    const x = parseInt(searchParams.get("x") || "");
-    const y = parseInt(searchParams.get("y") || "");
-    const zoom = parseFloat(searchParams.get("z") || "");
-
-    const isValidCoord = (val: number) =>
-      typeof val === "number" && !isNaN(val);
-
-    if (isValidCoord(x) && isValidCoord(y) && x >= 0 && y >= 0) {
-      setCenterCoord({ x, y });
-
-      const scale =
-        zoom >= MIN_SCALE && zoom <= MAX_SCALE ? zoom : INITIAL_SCALE;
-      updateScale(scale);
-
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-
-      offsetRef.current = {
-        x: centerX - x * scale,
-        y: centerY - y * scale,
-      };
-    } else {
-      const centerCanvas = () => {
-        const canvas = canvasRef.current;
-
-        if (!canvas) return;
-        updateScale(INITIAL_SCALE);
-
-        offsetRef.current = {
-          x: (canvas.width - CANVAS_WIDTH * INITIAL_SCALE) / 2,
-          y: (canvas.height - CANVAS_HEIGHT * INITIAL_SCALE) / 2,
-        };
-      };
-
-      centerCanvas(); // fallback
-    }
-  }, []);
-
-  useEffect(() => {
-    if (cooldown.remaining <= 0) return;
-
-    const interval = setInterval(() => {
-      setCooldown((prev) => ({
-        ...prev,
-        remaining: Math.max(prev.remaining - 100, 0),
-      }));
-    }, 100);
-
-    return () => clearInterval(interval);
-  }, [cooldown.remaining]);
+  useEffect(handleCooldownInternal, [cooldown.remaining]);
 
   useEffect(() => {
     selectedColorRef.current = selectedColor;
   }, [selectedColor]);
 
-  const updateUrlWithCoordinates = () => {
-    const centerX = Math.floor(
-      (window.innerWidth / 2 - offsetRef.current.x) / scaleRef.current
-    );
-    const centerY = Math.floor(
-      (window.innerHeight / 2 - offsetRef.current.y) / scaleRef.current
-    );
-    const zoom = Math.round(scaleRef.current * 100) / 100;
+  useEffect(setupEventListeners, []);
 
-    const params = new URLSearchParams();
-    params.set("x", centerX.toString());
-    params.set("y", centerY.toString());
-    params.set("z", zoom.toString());
+  useEffect(checkIfAdmin, []);
 
-    const newUrl = `${window.location.pathname}?${params.toString()}`;
-    window.history.replaceState({}, "", newUrl); // ✅ no reload, no GET
+  // Socket event handlers
+  const handlePixelPlaced = ({
+    x,
+    y,
+    color,
+  }: {
+    x: number;
+    y: number;
+    color: string;
+  }) => {
+    const key = `${x}:${y}`;
+    pixelsRef.current.set(key, color);
 
-    setCenterCoord({ x: centerX, y: centerY });
+    const index = y * CANVAS_WIDTH + x;
+    const abgr = hexToABGR(color);
+
+    if (imageUint32Ref.current && imageDataRef.current) {
+      imageUint32Ref.current[index] = abgr;
+      offscreenCtx.putImageData(imageDataRef.current, 0, 0);
+    } else {
+      // fallback if image buffer not initialized
+      renderPixelsToOffscreen();
+    }
   };
 
-  const updateScale = (newScale: number) => {
-    scaleRef.current = newScale;
-    setDisplayScale(newScale);
+  const handleCanvasState = (canvas: Record<string, string>) => {
+    const newMap = new Map<string, string>(Object.entries(canvas));
+    pixelsRef.current = newMap;
+    renderPixelsToOffscreen();
   };
 
-  const drawHoverPixel = (ctx: CanvasRenderingContext2D) => {
-    if (!hoverPixelRef.current || isTouchDevice.current) return;
-    const hoverPixel = hoverPixelRef.current;
-
-    ctx.strokeStyle = selectedColorRef.current;
-    ctx.lineWidth = 1 / scaleRef.current;
-    ctx.strokeRect(hoverPixel.x, hoverPixel.y, 1, 1);
-    ctx.fillStyle = selectedColorRef.current + "33";
-    ctx.fillRect(hoverPixel.x, hoverPixel.y, 1, 1);
+  const handleCooldown = ({
+    remaining,
+    total,
+  }: {
+    remaining: number;
+    total: number;
+  }) => {
+    setCooldown({ remaining, total });
   };
 
-  const renderPixelsToOffscreen = () => {
-    const imageData = offscreenCtx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
-    const uint32View = new Uint32Array(imageData.data.buffer);
-
-    pixelsRef.current.forEach((color, key) => {
-      const [x, y] = key.split(":").map(Number);
-      const index = y * CANVAS_WIDTH + x;
-      uint32View[index] = hexToABGR(color);
-    });
-
-    imageDataRef.current = imageData;
-    imageUint32Ref.current = uint32View;
-
-    offscreenCtx.putImageData(imageData, 0, 0);
-  };
-
+  // Draw methods
   const drawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -293,6 +212,46 @@ const PixelCanvas: React.FC = () => {
     requestAnimationFrame(drawCanvas);
   };
 
+  const renderPixelsToOffscreen = () => {
+    const imageData = offscreenCtx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
+    const uint32View = new Uint32Array(imageData.data.buffer);
+
+    pixelsRef.current.forEach((color, key) => {
+      const [x, y] = key.split(":").map(Number);
+      const index = y * CANVAS_WIDTH + x;
+      uint32View[index] = hexToABGR(color);
+    });
+
+    imageDataRef.current = imageData;
+    imageUint32Ref.current = uint32View;
+
+    offscreenCtx.putImageData(imageData, 0, 0);
+  };
+
+  const handleEmitPixel = (x: number, y: number) => {
+    if (cooldown.remaining > 0) return;
+
+    if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
+
+    socketRef.current?.emit("place-pixel", {
+      x,
+      y,
+      color: selectedColor,
+      isAdmin,
+    });
+  };
+
+  const drawHoverPixel = (ctx: CanvasRenderingContext2D) => {
+    if (!hoverPixelRef.current || isTouchDeviceRef.current) return;
+    const hoverPixel = hoverPixelRef.current;
+
+    ctx.strokeStyle = selectedColorRef.current;
+    ctx.lineWidth = 1 / scaleRef.current;
+    ctx.strokeRect(hoverPixel.x, hoverPixel.y, 1, 1);
+    ctx.fillStyle = selectedColorRef.current + "33";
+    ctx.fillRect(hoverPixel.x, hoverPixel.y, 1, 1);
+  };
+
   const drawGrid = (ctx: CanvasRenderingContext2D) => {
     if (scaleRef.current < GRID_SCALE_THRESHOLD) return;
 
@@ -315,6 +274,7 @@ const PixelCanvas: React.FC = () => {
     ctx.stroke();
   };
 
+  // Events handlers
   const handleWheel = (e: WheelEvent) => {
     e.preventDefault();
 
@@ -340,22 +300,25 @@ const PixelCanvas: React.FC = () => {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
-
+    if (e.button === 0 && isAdmin) {
+      isMouseDownRef.current = true;
+    }
     /* If right click */
-    if (e.button === 2) isDraggingRef.current = true;
+    if (e.button === 2) {
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      isDraggingRef.current = true;
+    }
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    isTouchDevice.current = false;
+    isTouchDeviceRef.current = false;
 
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    const [x, y] = getCoordinatesFromMouseEvent(e);
 
     if (!isDraggingRef.current) {
-      const x = Math.floor((mouseX - offsetRef.current.x) / scaleRef.current);
-      const y = Math.floor((mouseY - offsetRef.current.y) / scaleRef.current);
+      if (isMouseDownRef.current && isAdmin) {
+        handleEmitPixel(x, y);
+      }
 
       hoverPixelRef.current =
         x >= 0 && y >= 0 && x < CANVAS_WIDTH && y < CANVAS_HEIGHT
@@ -368,32 +331,23 @@ const PixelCanvas: React.FC = () => {
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button === 0 && isAdmin) {
+      isMouseDownRef.current = false;
+    }
+
     isDraggingRef.current = false;
     updateUrlWithCoordinates();
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement, MouseEvent>) => {
-    if (cooldown.remaining > 0) return;
+    const [x, y] = getCoordinatesFromMouseEvent(e);
 
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const x = Math.floor((mouseX - offsetRef.current.x) / scaleRef.current);
-    const y = Math.floor((mouseY - offsetRef.current.y) / scaleRef.current);
-
-    if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
-
-    socketRef.current?.emit("place-pixel", {
-      x,
-      y,
-      color: selectedColor,
-    });
+    handleEmitPixel(x, y);
   };
 
   const handleTouchStart = (e: TouchEvent) => {
-    isTouchDevice.current = true;
+    isTouchDeviceRef.current = true;
 
     if (e.touches.length === 1) {
       isDraggingRef.current = true;
@@ -479,7 +433,110 @@ const PixelCanvas: React.FC = () => {
     });
   };
 
-  useEffect(() => {
+  // Utils
+
+  const getCoordinatesFromMouseEvent = (
+    e: React.MouseEvent<HTMLCanvasElement>
+  ) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    const x = Math.floor((mouseX - offsetRef.current.x) / scaleRef.current);
+    const y = Math.floor((mouseY - offsetRef.current.y) / scaleRef.current);
+
+    return [x, y];
+  };
+  const updateUrlWithCoordinates = () => {
+    const centerX = Math.floor(
+      (window.innerWidth / 2 - offsetRef.current.x) / scaleRef.current
+    );
+    const centerY = Math.floor(
+      (window.innerHeight / 2 - offsetRef.current.y) / scaleRef.current
+    );
+    const zoom = Math.round(scaleRef.current * 100) / 100;
+
+    const params = new URLSearchParams();
+    params.set("x", centerX.toString());
+    params.set("y", centerY.toString());
+    params.set("z", zoom.toString());
+
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, "", newUrl); // ✅ no reload, no GET
+
+    setCenterCoord({ x: centerX, y: centerY });
+  };
+
+  const updateScale = (newScale: number) => {
+    scaleRef.current = newScale;
+    setDisplayScale(newScale);
+  };
+
+  function setupInitialCanvasPosition() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const x = parseInt(searchParams.get("x") || "");
+    const y = parseInt(searchParams.get("y") || "");
+    const zoom = parseFloat(searchParams.get("z") || "");
+
+    const isValidCoord = (val: number) =>
+      typeof val === "number" && !isNaN(val);
+
+    if (isValidCoord(x) && isValidCoord(y) && x >= 0 && y >= 0) {
+      setCenterCoord({ x, y });
+
+      const scale =
+        zoom >= MIN_SCALE && zoom <= MAX_SCALE ? zoom : INITIAL_SCALE;
+      updateScale(scale);
+
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+
+      offsetRef.current = {
+        x: centerX - x * scale,
+        y: centerY - y * scale,
+      };
+    } else {
+      const centerCanvas = () => {
+        const canvas = canvasRef.current;
+
+        if (!canvas) return;
+        updateScale(INITIAL_SCALE);
+
+        offsetRef.current = {
+          x: (canvas.width - CANVAS_WIDTH * INITIAL_SCALE) / 2,
+          y: (canvas.height - CANVAS_HEIGHT * INITIAL_SCALE) / 2,
+        };
+      };
+
+      centerCanvas(); // fallback
+    }
+  }
+
+  function handleCooldownInternal() {
+    if (cooldown.remaining <= 0) return;
+
+    const interval = setInterval(() => {
+      setCooldown((prev) => ({
+        ...prev,
+        remaining: Math.max(prev.remaining - 100, 0),
+      }));
+    }, 100);
+
+    return () => clearInterval(interval);
+  }
+
+  function checkIfAdmin() {
+    const _isAdmin = parseInt(searchParams.get("ia") || "");
+
+    setIsAdmin(_isAdmin === 1 ? true : false);
+  }
+
+  function setupEventListeners() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -492,7 +549,7 @@ const PixelCanvas: React.FC = () => {
       canvas.removeEventListener("touchmove", handleTouchMove);
       canvas.removeEventListener("wheel", handleWheel);
     };
-  }, []);
+  }
 
   return (
     <div className="w-screen h-screen overflow-hidden relative">
