@@ -1,35 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { io } from "socket.io-client";
+import socket from "@/socket";
+import { useEffect, useRef, useState } from "react";
 
-const socket = io("/", { transports: ["websocket"] });
+type ChatMessage = { author: string; message: string };
 
 const ChatBox = () => {
   const [open, setOpen] = useState(true);
-  const [messages, setMessages] = useState<string[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [pseudonym, setPseudonym] = useState("Anonymous");
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const pseudo = localStorage.getItem("pseudonym");
-    if (pseudo) setPseudonym(pseudo);
+    const handleChatMessage = (chatMessage: ChatMessage) => {
+      setMessages((prev) => [...prev.slice(-100), chatMessage]);
+    };
 
-    socket.on("chat-message", (msg: string) => {
-      console.log({ msg, messages });
-      setMessages((prev) => [...prev.slice(-100), msg]);
-    });
+    socket.on("chat-message", handleChatMessage);
 
     return () => {
-      socket.off("chat-message");
+      socket.off("chat-message", handleChatMessage);
     };
   }, []);
+
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
 
   const sendMessage = () => {
     const trimmed = input.trim();
     if (trimmed.length > 0) {
-      const fullMsg = `${pseudonym}: ${trimmed}`;
-      socket.emit("chat-message", fullMsg);
+      socket.emit("chat-message", trimmed);
       setInput("");
     }
   };
@@ -37,7 +40,7 @@ const ChatBox = () => {
   return (
     <div className="fixed top-3 right-4 z-50">
       {open ? (
-        <div className="bg-white border rounded-lg shadow w-64 max-h-64 flex flex-col">
+        <div className="bg-white border rounded-lg shadow w-64 h-[250px] flex flex-col">
           <div className="flex justify-between items-center px-2 py-1 border-b">
             <span className="text-sm font-semibold">Chat</span>
             <button
@@ -49,8 +52,11 @@ const ChatBox = () => {
           </div>
           <div className="flex-1 overflow-y-auto p-2 text-xs text-gray-800">
             {messages.map((msg, idx) => (
-              <div key={idx}>{msg}</div>
+              <div key={idx}>
+                <strong>{msg.author}:</strong> {msg.message}
+              </div>
             ))}
+            <div ref={bottomRef} />
           </div>
           <div className="flex border-t p-1">
             <input

@@ -2,4 +2,9 @@
 
 import { io } from "socket.io-client";
 
-export const socket = io();
+const socket = io("/", {
+  transports: ["websocket"],
+  autoConnect: true,
+});
+
+export default socket;

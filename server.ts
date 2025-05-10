@@ -29,7 +29,19 @@ const users = new Map<
     connectedAt: number; // timestamp in ms
   }
 >();
-const blacklist = new Set<string>(); // IPs banned for spamming
+
+const getUserList = () =>
+  Array.from(users.entries())
+    .map(([ip, user]) => ({
+      ip,
+      pseudonym: user.pseudonym || "Anonymous",
+      connectedAt: user.connectedAt,
+      pixelCount: user.pixelCount,
+    }))
+    .sort((a, b) => b.pixelCount - a.pixelCount);
+
+// In-memory cache to avoid Redis lookups every time
+const blacklistCache = new Set<string>();
 
 app.prepare().then(() => {
   const httpServer = createServer(handler);
@@ -44,6 +56,15 @@ app.prepare().then(() => {
       (socket.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
       socket.handshake.address;
 
+    const isBlacklisted =
+      blacklistCache.has(ip) || (await pub.sismember("blacklist", ip));
+    if (isBlacklisted) {
+      console.warn(`⛔ Blocked blacklisted IP on connect: ${ip}`);
+      blacklistCache.add(ip);
+      socket.disconnect(true);
+      return;
+    }
+
     if (!users.has(ip)) {
       users.set(ip, {
         pixelCount: 0,
@@ -51,7 +72,7 @@ app.prepare().then(() => {
         connectedAt: Date.now(),
       });
     }
-    io.emit("user-count", users.size);
+    io.emit("user-list", getUserList());
 
     console.log(`🧠 New client connected: ${socket.id} (IP: ${ip})`);
 
@@ -72,12 +93,14 @@ app.prepare().then(() => {
     socket.on(
       "place-pixel",
       async (pixel: { x: number; y: number; color: string }) => {
-        if (blacklist.has(ip)) {
-          console.warn(`⛔ Blocked blacklisted IP: ${ip}`);
+        // === Blacklist check ===
+        if (blacklistCache.has(ip) || (await pub.sismember("blacklist", ip))) {
+          console.warn(`⛔ Blocked blacklisted IP during place-pixel: ${ip}`);
+          blacklistCache.add(ip);
           return;
         }
 
-        // === Rate limiting check ===
+        // === Rate limiting ===
         const user = users.get(ip);
         if (!user) return;
 
@@ -90,12 +113,13 @@ app.prepare().then(() => {
           user.rate.count += 1;
           if (user.rate.count > 100) {
             console.warn(`🚨 Blacklisting IP ${ip} for spamming`);
-            io.emit(
-              "chat-message",
-              `[SERVER] Blacklisting ${ip} for spamming pixels.`
-            );
-            blacklist.add(ip);
-            socket.disconnect(true); // Kick user
+            io.emit("chat-message", {
+              author: "SERVER",
+              message: `Blacklisting ${ip} for spamming pixels.`,
+            });
+            await pub.sadd("blacklist", ip);
+            blacklistCache.add(ip);
+            socket.disconnect(true);
             return;
           }
         }
@@ -103,7 +127,6 @@ app.prepare().then(() => {
         const { x, y, color } = pixel;
 
         // === Coordinate validation ===
-        console.log("coordinate check");
         if (
           typeof x !== "number" ||
           typeof y !== "number" ||
@@ -133,12 +156,11 @@ app.prepare().then(() => {
           const ttl = await pub.pttl(cooldownKey); // in ms
 
           if (onCooldown) {
-            const ttl = await pub.pttl(cooldownKey);
             socket.emit("cooldown", { remaining: ttl, total: currentCooldown });
             return;
           }
 
-          await pub.set(cooldownKey, "1", "PX", currentCooldown); // 0.5s cooldown
+          await pub.set(cooldownKey, "1", "PX", currentCooldown);
           socket.emit("cooldown", {
             remaining: currentCooldown,
             total: currentCooldown,
@@ -146,7 +168,6 @@ app.prepare().then(() => {
         }
 
         const redisKey = `${x}:${y}`;
-
         await pub.hset("canvas", redisKey, colorIndex.toString());
         await pub.publish("pixel", JSON.stringify({ x, y, color }));
 
@@ -155,7 +176,6 @@ app.prepare().then(() => {
     );
 
     socket.on("disconnect", () => {
-      // Remove the IP only if no other sockets from this IP remain
       const stillConnected = Array.from(io.sockets.sockets.values()).some(
         (s) =>
           ((s.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
@@ -174,16 +194,57 @@ app.prepare().then(() => {
         if (user) {
           user.pseudonym = pseudo.trim();
           console.log(`👤 IP ${ip} is now known as "${user.pseudonym}"`);
+          io.emit("chat-message", {
+            author: "SERVER",
+            message: `${user.pseudonym} joined the chaos`,
+          });
         }
       }
     });
 
     socket.on("chat-message", (msg: string) => {
       if (typeof msg === "string" && msg.length < 200) {
-        io.emit("chat-message", msg);
+        const user = users.get(ip);
+        const author = user?.pseudonym || "Anonymous";
+
+        io.emit("chat-message", {
+          author,
+          message: msg.trim(),
+        });
+      }
+    });
+
+    socket.on("admin-command", (data) => {
+      const { ip: targetIp, command, adminToken, ...commandArgs } = data;
+
+      if (
+        !adminToken || // falsy: undefined, null, ""
+        !process.env.ADMIN_SECRET_KEY || // unset or empty
+        adminToken !== process.env.ADMIN_SECRET_KEY
+      ) {
+        return;
+      }
+
+      console.log("received admin commands", data);
+
+      if (typeof targetIp !== "string" || typeof command !== "string") return;
+
+      // Find all sockets of the target IP
+      for (const [id, s] of io.sockets.sockets.entries()) {
+        const sIp =
+          (s.handshake.headers["x-forwarded-for"] as string)?.split(",")[0] ||
+          s.handshake.address;
+
+        if (sIp === targetIp) {
+          s.emit("admin-command", { command, ...commandArgs });
+        }
       }
     });
   });
+
+  setInterval(() => {
+    io.emit("user-list", getUserList());
+  }, 1000);
 
   // Broadcast pixel placements to all clients
   sub.subscribe("pixel");
@@ -195,7 +256,6 @@ app.prepare().then(() => {
   sub.subscribe("cooldown:update");
   sub.on("message", (channel, message) => {
     if (channel === "cooldown:update") {
-      console.log("received cooldown update");
       const newCooldown = parseInt(message, 10);
       io.emit("cooldown-updated", { cooldown: newCooldown });
     }

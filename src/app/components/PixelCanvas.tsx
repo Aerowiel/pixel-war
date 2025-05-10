@@ -553,12 +553,6 @@ const PixelCanvas: React.FC = () => {
 
   return (
     <div className="w-screen h-screen overflow-hidden relative">
-      {/* Connected Users (Top-Left) */}
-      <div className="absolute top-3 left-3 z-10 pointer-events-auto">
-        <div className="bg-white/80 backdrop-blur px-3 py-1 rounded-full shadow text-sm text-gray-800">
-          {userCount} online
-        </div>
-      </div>
       <div className="absolute top-3 left-1/2 transform -translate-x-1/2 z-10 pointer-events-auto">
         <div className="flex items-center bg-white/80 backdrop-blur px-4 py-2 rounded-full shadow text-sm font-medium">
           {`(${centerCoord.x}, ${centerCoord.y}) ${
