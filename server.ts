@@ -77,18 +77,18 @@ app.prepare().then(() => {
     console.log(`🧠 New client connected: ${socket.id} (IP: ${ip})`);
 
     // Send full canvas state on connect
-    const raw = await pub.hgetall("canvas");
-    const canvas: Record<string, string> = {};
+    const totalPixels = CANVAS_WIDTH * CANVAS_HEIGHT;
+    const byteLength = Math.ceil((totalPixels * 4) / 8);
 
-    for (const [key, colorIndexStr] of Object.entries(raw)) {
-      const [x, y] = key.split(":").map(Number);
-      const color = COLOR_PALETTE[parseInt(colorIndexStr)];
-      if (!isNaN(x) && !isNaN(y) && color) {
-        canvas[`${x}:${y}`] = color;
-      }
-    }
+    // Get the packed canvas as raw buffer
+    const buffer = await pub.getrangeBuffer(
+      "canvas:bitfield",
+      0,
+      byteLength - 1
+    );
 
-    socket.emit("canvas-state", canvas);
+    // Send raw buffer (as-is)
+    socket.emit("canvas-state-binary", buffer);
 
     socket.on(
       "place-pixel",
@@ -111,7 +111,7 @@ app.prepare().then(() => {
           user.rate.lastTimestamp = now;
         } else {
           user.rate.count += 1;
-          if (user.rate.count > 100) {
+          if (user.rate.count > 1000) {
             console.warn(`🚨 Blacklisting IP ${ip} for spamming`);
             io.emit("chat-message", {
               author: "SERVER",
@@ -146,7 +146,7 @@ app.prepare().then(() => {
 
         // === Cooldown check ===
         const currentCooldown = parseInt(
-          (await pub.get(REDIS_COOLDOWN_KEY)) || "5000",
+          (await pub.get(REDIS_COOLDOWN_KEY)) || "0",
           10
         );
 
@@ -167,8 +167,14 @@ app.prepare().then(() => {
           });
         }
 
-        const redisKey = `${x}:${y}`;
-        await pub.hset("canvas", redisKey, colorIndex.toString());
+        const bitOffset = (y * CANVAS_WIDTH + x) * 4;
+        await (pub as any).bitfield("canvas:bitfield", [
+          "SET",
+          "u4",
+          bitOffset,
+          colorIndex,
+        ]);
+
         await pub.publish("pixel", JSON.stringify({ x, y, color }));
 
         user.pixelCount += 1;

@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 type ChatMessage = { author: string; message: string };
 
 const ChatBox = () => {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);

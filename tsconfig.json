@@ -29,6 +29,6 @@
     ".next/types/**/*.ts",
     "server.ts",
     "lib/**/*"
-  ],
+, "import.js"  ],
   "exclude": ["node_modules"]
 }

@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useRef, useEffect, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import { useSearchParams } from "next/navigation";
@@ -68,7 +70,6 @@ const PixelCanvas: React.FC = () => {
     total: 0,
   });
   const [centerCoord, setCenterCoord] = useState<PixelCoord>({ x: 0, y: 0 });
-  const [userCount, setUserCount] = useState<number>(0);
 
   // Admin
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
@@ -95,16 +96,16 @@ const PixelCanvas: React.FC = () => {
 
     socket.on("pixel-placed", handlePixelPlaced);
 
-    socket.on("canvas-state", handleCanvasState);
+    socket.on("canvas-state-binary", handleIntialCanvasState);
 
     socket.on("cooldown", handleCooldown);
 
-    socket.on("user-count", (count: number) => {
-      setUserCount(count);
-    });
-
     return () => {
-      socket.disconnect();
+      socket.off("pixel-placed", handlePixelPlaced);
+
+      socket.off("canvas-state-binary", handleIntialCanvasState);
+
+      socket.off("cooldown", handleCooldown);
     };
   }, []);
 
@@ -145,8 +146,28 @@ const PixelCanvas: React.FC = () => {
     }
   };
 
-  const handleCanvasState = (canvas: Record<string, string>) => {
-    const newMap = new Map<string, string>(Object.entries(canvas));
+  const handleIntialCanvasState = (arrayBuffer: ArrayBuffer) => {
+    console.log("received buffer", arrayBuffer.byteLength);
+    const packed = new Uint8Array(arrayBuffer);
+    const totalPixels = CANVAS_WIDTH * CANVAS_HEIGHT;
+    const unpacked = new Uint8Array(totalPixels);
+
+    for (let i = 0; i < totalPixels; i++) {
+      const byteIndex = Math.floor(i / 2);
+      const isHighNibble = i % 2 === 0;
+      const byte = packed[byteIndex];
+      unpacked[i] = isHighNibble ? (byte >> 4) & 0x0f : byte & 0x0f;
+    }
+
+    const newMap = new Map<string, string>();
+    unpacked.forEach((colorIndex, i) => {
+      if (colorIndex >= 0 && colorIndex < COLOR_PALETTE.length) {
+        const x = i % CANVAS_WIDTH;
+        const y = Math.floor(i / CANVAS_WIDTH);
+        newMap.set(`${x}:${y}`, COLOR_PALETTE[colorIndex]);
+      }
+    });
+
     pixelsRef.current = newMap;
     renderPixelsToOffscreen();
   };
@@ -237,7 +258,6 @@ const PixelCanvas: React.FC = () => {
       x,
       y,
       color: selectedColor,
-      isAdmin,
     });
   };
 
